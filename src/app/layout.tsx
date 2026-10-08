@@ -12,9 +12,43 @@ const fraunces = Fraunces({
   subsets: ["latin"],
 });
 
+const siteUrl = "https://family-dhikr.vercel.app";
+const shareDescription =
+  "Remember Allah together. Create a room and count dhikr with your family.";
+
 export const metadata: Metadata = {
-  title: "Family Dhikr",
-  description: "Count zikr together in shared family rooms.",
+  metadataBase: new URL(siteUrl),
+  title: {
+    default: "Family Dhikr",
+    template: "%s · Family Dhikr",
+  },
+  description: shareDescription,
+  applicationName: "Family Dhikr",
+  icons: {
+    icon: [{ url: "/icon.png", type: "image/png" }],
+    apple: [{ url: "/apple-icon.png", type: "image/png" }],
+  },
+  openGraph: {
+    type: "website",
+    url: siteUrl,
+    siteName: "Family Dhikr",
+    title: "Family Dhikr",
+    description: shareDescription,
+    images: [
+      {
+        url: "/og.png",
+        width: 1024,
+        height: 1024,
+        alt: "Family Dhikr",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary",
+    title: "Family Dhikr",
+    description: shareDescription,
+    images: ["/og.png"],
+  },
 };
 
 export const viewport: Viewport = {

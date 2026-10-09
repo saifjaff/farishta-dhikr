@@ -85,6 +85,13 @@ export const COMMON_DHIKRS: Dhikr[] = [
     transliteration: "Amman yujībul-muḍṭarra idhā daʿāhu wa yakshifus-sūʾ",
     meaning: "Who answers the distressed when they call upon Him and removes evil",
   },
+  {
+    key: "ya-salamu",
+    label: "Ya Salamu",
+    arabic: "يَا سَلَامُ",
+    transliteration: "Yā Salāmu",
+    meaning: "O Source of Peace",
+  },
 ];
 
 export const DEFAULT_DHIKR = COMMON_DHIKRS[0];

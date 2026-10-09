@@ -1,11 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import type { RealtimeChannel } from "@supabase/supabase-js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DhikrPreview from "@/components/DhikrPreview";
 import { roomDhikr } from "@/lib/dhikr";
 import { getSavedName, saveName } from "@/lib/storage";
 import { getSupabase } from "@/lib/supabase";
+import { getClientId, TAP_FLUSH_MS, type TapBroadcast } from "@/lib/tap-sync";
 import type { Room, RoomMember } from "@/lib/types";
 
 type Props = {
@@ -16,18 +18,55 @@ const dhikrHiddenKey = (code: string) => `family-dhikr:hide-dhikr:${code}`;
 
 type CountMode = "group" | "personal";
 
+function bumpPersonal(
+  members: RoomMember[],
+  displayName: string,
+  delta: number,
+  roomId: string,
+): RoomMember[] {
+  if (delta <= 0) return members;
+  const me = displayName.trim().toLowerCase();
+  const idx = members.findIndex(
+    (m) => m.display_name.trim().toLowerCase() === me,
+  );
+  if (idx === -1) {
+    return [
+      ...members,
+      {
+        id: `local-${displayName}`,
+        room_id: roomId,
+        display_name: displayName,
+        taps: delta,
+        last_seen: new Date().toISOString(),
+      },
+    ];
+  }
+  return members.map((m, i) =>
+    i === idx ? { ...m, taps: m.taps + delta } : m,
+  );
+}
+
 export default function RoomClient({ code }: Props) {
   const roomCode = code.toUpperCase();
   const [room, setRoom] = useState<Room | null>(null);
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [name, setName] = useState("");
   const [nameDraft, setNameDraft] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [bump, setBump] = useState(false);
   const [dhikrOpen, setDhikrOpen] = useState(true);
   const [countMode, setCountMode] = useState<CountMode>("group");
+
+  const channelRef = useRef<RealtimeChannel | null>(null);
+  const pendingDeltaRef = useRef(0);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushingRef = useRef(false);
+  const displayNameRef = useRef("");
+  const clientIdRef = useRef("");
+  const membersReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   const progress = useMemo(() => {
     if (!room || room.goal <= 0) return 0;
@@ -56,7 +95,8 @@ export default function RoomClient({ code }: Props) {
     return member?.taps ?? 0;
   }, [members, name]);
 
-  const displayCount = countMode === "personal" ? personalCount : (room?.count ?? 0);
+  const displayCount =
+    countMode === "personal" ? personalCount : (room?.count ?? 0);
 
   const loadMembers = useCallback(async (roomId: string) => {
     const supabase = getSupabase();
@@ -69,10 +109,94 @@ export default function RoomClient({ code }: Props) {
     setMembers((data ?? []) as RoomMember[]);
   }, []);
 
+  const scheduleMembersReload = useCallback(
+    (roomId: string) => {
+      if (membersReloadTimerRef.current) return;
+      membersReloadTimerRef.current = setTimeout(() => {
+        membersReloadTimerRef.current = null;
+        void loadMembers(roomId);
+      }, 1200);
+    },
+    [loadMembers],
+  );
+
+  const pulse = useCallback(() => {
+    setBump(true);
+    window.setTimeout(() => setBump(false), 180);
+  }, []);
+
+  const applyLocalDelta = useCallback(
+    (delta: number, displayName: string) => {
+      setRoom((prev) =>
+        prev ? { ...prev, count: Math.max(0, prev.count + delta) } : prev,
+      );
+      if (delta > 0) {
+        setMembers((prev) =>
+          bumpPersonal(prev, displayName, delta, room?.id ?? ""),
+        );
+      }
+      pulse();
+    },
+    [pulse, room?.id],
+  );
+
+  const flushPending = useCallback(async () => {
+    if (flushingRef.current) return;
+    const delta = pendingDeltaRef.current;
+    if (delta === 0) return;
+
+    pendingDeltaRef.current = 0;
+    flushingRef.current = true;
+    const displayName = displayNameRef.current;
+
+    try {
+      const { data, error: rpcError } = await getSupabase().rpc(
+        "adjust_room_count",
+        {
+          p_code: roomCode,
+          p_delta: delta,
+          p_display_name: displayName || null,
+        },
+      );
+      if (rpcError) throw rpcError;
+
+      // Only trust server count when nothing else is queued
+      if (pendingDeltaRef.current === 0) {
+        const updated = (Array.isArray(data) ? data[0] : data) as Room;
+        setRoom(updated);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Update failed.");
+      const { data } = await getSupabase()
+        .from("rooms")
+        .select("*")
+        .eq("code", roomCode)
+        .single();
+      if (data && pendingDeltaRef.current === 0) {
+        setRoom(data as Room);
+      }
+    } finally {
+      flushingRef.current = false;
+      if (pendingDeltaRef.current !== 0) {
+        void flushPending();
+      }
+    }
+  }, [roomCode]);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushTimerRef.current) return;
+    flushTimerRef.current = setTimeout(() => {
+      flushTimerRef.current = null;
+      void flushPending();
+    }, TAP_FLUSH_MS);
+  }, [flushPending]);
+
   useEffect(() => {
     const saved = getSavedName();
     setName(saved);
     setNameDraft(saved);
+    displayNameRef.current = saved;
+    clientIdRef.current = getClientId();
     const hidden = localStorage.getItem(dhikrHiddenKey(roomCode)) === "1";
     setDhikrOpen(!hidden);
   }, [roomCode]);
@@ -87,8 +211,6 @@ export default function RoomClient({ code }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    let channel: ReturnType<ReturnType<typeof getSupabase>["channel"]> | null =
-      null;
 
     async function boot() {
       try {
@@ -107,6 +229,7 @@ export default function RoomClient({ code }: Props) {
 
         const savedName = getSavedName().trim();
         if (savedName) {
+          displayNameRef.current = savedName;
           await supabase.rpc("join_room", {
             p_code: roomCode,
             p_display_name: savedName,
@@ -114,8 +237,20 @@ export default function RoomClient({ code }: Props) {
           if (!cancelled) await loadMembers(current.id);
         }
 
-        channel = supabase
-          .channel(`room:${roomCode}`)
+        const channel = supabase
+          .channel(`room-live:${roomCode}`, {
+            config: { broadcast: { self: false } },
+          })
+          .on(
+            "broadcast",
+            { event: "tap" },
+            ({ payload }) => {
+              const tap = payload as TapBroadcast;
+              if (!tap || tap.clientId === clientIdRef.current) return;
+              if (!tap.delta) return;
+              applyLocalDelta(tap.delta, tap.displayName || "Guest");
+            },
+          )
           .on(
             "postgres_changes",
             {
@@ -125,9 +260,15 @@ export default function RoomClient({ code }: Props) {
               filter: `id=eq.${current.id}`,
             },
             (payload) => {
+              // Reconcile from DB only when local queue is idle
+              if (
+                pendingDeltaRef.current !== 0 ||
+                flushingRef.current ||
+                flushTimerRef.current
+              ) {
+                return;
+              }
               setRoom(payload.new as Room);
-              setBump(true);
-              window.setTimeout(() => setBump(false), 220);
             },
           )
           .on(
@@ -139,10 +280,12 @@ export default function RoomClient({ code }: Props) {
               filter: `room_id=eq.${current.id}`,
             },
             () => {
-              void loadMembers(current.id);
+              scheduleMembersReload(current.id);
             },
           )
           .subscribe();
+
+        channelRef.current = channel;
       } catch (err) {
         if (!cancelled) {
           setError(
@@ -156,11 +299,30 @@ export default function RoomClient({ code }: Props) {
 
     return () => {
       cancelled = true;
-      if (channel) {
-        void getSupabase().removeChannel(channel);
+      if (flushTimerRef.current) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      if (membersReloadTimerRef.current) {
+        clearTimeout(membersReloadTimerRef.current);
+        membersReloadTimerRef.current = null;
+      }
+      // Flush any leftover taps before leaving
+      if (pendingDeltaRef.current !== 0) {
+        void flushPending();
+      }
+      if (channelRef.current) {
+        void getSupabase().removeChannel(channelRef.current);
+        channelRef.current = null;
       }
     };
-  }, [roomCode, loadMembers]);
+  }, [
+    roomCode,
+    loadMembers,
+    applyLocalDelta,
+    scheduleMembersReload,
+    flushPending,
+  ]);
 
   async function ensureName(): Promise<string | null> {
     const trimmed = name.trim() || nameDraft.trim();
@@ -172,77 +334,41 @@ export default function RoomClient({ code }: Props) {
       saveName(trimmed);
       setName(trimmed);
       setNameDraft(trimmed);
+      displayNameRef.current = trimmed;
       await getSupabase().rpc("join_room", {
         p_code: roomCode,
         p_display_name: trimmed,
       });
+    } else {
+      displayNameRef.current = trimmed;
     }
     return trimmed;
   }
 
   async function adjust(delta: number) {
-    if (busy) return;
     setError(null);
     const displayName = await ensureName();
     if (!displayName) return;
 
-    setBusy(true);
-    // Optimistic UI — group total always; personal taps only on +
-    setRoom((prev) =>
-      prev
-        ? { ...prev, count: Math.max(0, prev.count + delta) }
-        : prev,
-    );
-    if (delta > 0) {
-      setMembers((prev) => {
-        const me = displayName.trim().toLowerCase();
-        const idx = prev.findIndex(
-          (m) => m.display_name.trim().toLowerCase() === me,
-        );
-        if (idx === -1) {
-          return [
-            ...prev,
-            {
-              id: `local-${displayName}`,
-              room_id: room?.id ?? "",
-              display_name: displayName,
-              taps: delta,
-              last_seen: new Date().toISOString(),
-            },
-          ];
-        }
-        return prev.map((m, i) =>
-          i === idx ? { ...m, taps: m.taps + delta } : m,
-        );
-      });
-    }
-    setBump(true);
-    window.setTimeout(() => setBump(false), 220);
+    // 1) Instant local UI
+    applyLocalDelta(delta, displayName);
 
-    try {
-      const { data, error: rpcError } = await getSupabase().rpc(
-        "adjust_room_count",
-        {
-          p_code: roomCode,
-          p_delta: delta,
-          p_display_name: displayName,
-        },
-      );
-      if (rpcError) throw rpcError;
-      const updated = (Array.isArray(data) ? data[0] : data) as Room;
-      setRoom(updated);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed.");
-      // Reload truth from server
-      const { data } = await getSupabase()
-        .from("rooms")
-        .select("*")
-        .eq("code", roomCode)
-        .single();
-      if (data) setRoom(data as Room);
-    } finally {
-      setBusy(false);
-    }
+    // 2) Instant realtime to everyone else (Broadcast)
+    const payload: TapBroadcast = {
+      clientId: clientIdRef.current || getClientId(),
+      displayName,
+      delta,
+      at: Date.now(),
+    };
+    void channelRef.current?.send({
+      type: "broadcast",
+      event: "tap",
+      payload,
+    });
+
+    // 3) Queue durable DB write (batched, still near-realtime)
+    pendingDeltaRef.current += delta;
+    scheduleFlush();
   }
 
   async function saveDisplayName(e: React.FormEvent) {
@@ -251,6 +377,7 @@ export default function RoomClient({ code }: Props) {
     if (!trimmed) return;
     saveName(trimmed);
     setName(trimmed);
+    displayNameRef.current = trimmed;
     setError(null);
     try {
       await getSupabase().rpc("join_room", {
@@ -408,7 +535,7 @@ export default function RoomClient({ code }: Props) {
           <button
             type="button"
             onClick={() => void adjust(-1)}
-            disabled={busy || room.count <= 0}
+            disabled={room.count <= 0}
             className="tap-btn rounded-3xl border border-[rgba(16,41,36,0.12)] bg-white/80 py-6 text-4xl font-light text-[var(--ink)] disabled:opacity-40"
             aria-label="Decrease count"
           >
@@ -417,8 +544,7 @@ export default function RoomClient({ code }: Props) {
           <button
             type="button"
             onClick={() => void adjust(1)}
-            disabled={busy}
-            className="tap-btn rounded-3xl bg-[var(--accent)] py-6 text-4xl font-light text-white shadow-[0_16px_32px_rgba(47,143,120,0.35)] disabled:opacity-60"
+            className="tap-btn rounded-3xl bg-[var(--accent)] py-6 text-4xl font-light text-white shadow-[0_16px_32px_rgba(47,143,120,0.35)]"
             aria-label="Increase count"
           >
             +
@@ -457,7 +583,10 @@ export default function RoomClient({ code }: Props) {
               <p className="mb-2 text-center text-sm font-medium text-[var(--accent-deep)]">
                 {activeDhikr.label}
               </p>
-              <DhikrPreview dhikr={activeDhikr} className="border-0 bg-transparent px-0 py-1" />
+              <DhikrPreview
+                dhikr={activeDhikr}
+                className="border-0 bg-transparent px-0 py-1"
+              />
             </div>
           )}
         </section>

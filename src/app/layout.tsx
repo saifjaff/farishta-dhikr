@@ -13,7 +13,7 @@ const fraunces = Fraunces({
   subsets: ["latin"],
 });
 
-const siteUrl = "https://family-dhikr.vercel.app";
+const siteUrl = "https://dhikr.saif.space";
 const shareDescription =
   "Remember Allah together. Create a room and count dhikr with your family.";
 

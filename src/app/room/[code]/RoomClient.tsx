@@ -29,9 +29,10 @@ export default function RoomClient({ code }: Props) {
   const [countMode, setCountMode] = useState<CountMode>("group");
   // Local taps the server hasn't confirmed yet, layered on top of room.count.
   const [unconfirmed, setUnconfirmed] = useState(0);
-  // Your own taps only ever go up, so the higher of local vs server is correct.
+  // Moves instantly on your taps; re-synced from the server once your writes settle.
   const [myTaps, setMyTaps] = useState(0);
 
+  const writeSeqRef = useRef(0);
   const pendingRef = useRef(0);
   const inflightRef = useRef(0);
   const sendingRef = useRef(false);
@@ -67,16 +68,14 @@ export default function RoomClient({ code }: Props) {
     [name],
   );
 
-  const serverMyTaps = useMemo(() => {
-    if (!name.trim()) return 0;
-    return members.find(isMe)?.taps ?? 0;
-  }, [members, name, isMe]);
-
-  const personalCount = Math.max(myTaps, serverMyTaps);
+  const personalCount = myTaps;
 
   const displayCount = countMode === "personal" ? personalCount : groupCount;
 
   const loadMembers = useCallback(async (roomId: string) => {
+    const isIdle = () => !sendingRef.current && pendingRef.current === 0;
+    const seqAtStart = writeSeqRef.current;
+    const idleAtStart = isIdle();
     const supabase = getSupabase();
     const { data, error: membersError } = await supabase
       .from("room_members")
@@ -84,7 +83,16 @@ export default function RoomClient({ code }: Props) {
       .eq("room_id", roomId)
       .order("taps", { ascending: false });
     if (membersError) throw membersError;
-    setMembers((data ?? []) as RoomMember[]);
+    const list = (data ?? []) as RoomMember[];
+    setMembers(list);
+    // Only trust the server's personal count if none of our taps overlapped this fetch.
+    if (idleAtStart && isIdle() && seqAtStart === writeSeqRef.current) {
+      const me = displayNameRef.current.toLowerCase();
+      const mine = me
+        ? list.find((m) => m.display_name.trim().toLowerCase() === me)
+        : undefined;
+      setMyTaps(mine?.taps ?? 0);
+    }
   }, []);
 
   const scheduleMembersReload = useCallback(() => {
@@ -240,7 +248,10 @@ export default function RoomClient({ code }: Props) {
               scheduleMembersReload();
             },
           )
-          .subscribe();
+          .subscribe((status) => {
+            // Fires on first connect and on every reconnect; events missed while offline aren't replayed.
+            if (status === "SUBSCRIBED") refresh();
+          });
       } catch (err) {
         if (!cancelled) {
           setError(
@@ -250,10 +261,28 @@ export default function RoomClient({ code }: Props) {
       }
     }
 
+    function refresh() {
+      if (cancelled || !roomIdRef.current) return;
+      void drain();
+      scheduleReconcile();
+      void loadMembers(roomIdRef.current).catch(() => {});
+    }
+
+    function onVisible() {
+      if (document.visibilityState === "visible") refresh();
+    }
+
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", refresh);
+    window.addEventListener("focus", refresh);
+
     void boot();
 
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("focus", refresh);
       if (membersTimerRef.current) clearTimeout(membersTimerRef.current);
       if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current);
       membersTimerRef.current = null;
@@ -262,7 +291,7 @@ export default function RoomClient({ code }: Props) {
         void getSupabase().removeChannel(channel);
       }
     };
-  }, [roomCode, loadMembers, scheduleMembersReload]);
+  }, [roomCode, loadMembers, scheduleMembersReload, drain, scheduleReconcile]);
 
   async function ensureName(): Promise<string | null> {
     const trimmed = name.trim() || nameDraft.trim();
@@ -293,12 +322,12 @@ export default function RoomClient({ code }: Props) {
       return;
     }
     if (delta < 0 && groupCount <= 0) return;
+    if (delta < 0 && countMode === "personal" && personalCount <= 0) return;
 
+    writeSeqRef.current += 1;
     pendingRef.current += delta;
     syncUnconfirmed();
-    if (delta > 0) {
-      setMyTaps((t) => Math.max(t, serverMyTaps) + delta);
-    }
+    setMyTaps((t) => Math.max(0, t + delta));
     setBump(true);
     window.setTimeout(() => setBump(false), 220);
     void drain();
@@ -469,7 +498,10 @@ export default function RoomClient({ code }: Props) {
           <button
             type="button"
             onClick={() => adjust(-1)}
-            disabled={groupCount <= 0}
+            disabled={
+              groupCount <= 0 ||
+              (countMode === "personal" && personalCount <= 0)
+            }
             className="tap-btn rounded-3xl border border-[rgba(16,41,36,0.12)] bg-white/80 py-6 text-4xl font-light text-[var(--ink)] disabled:opacity-40"
             aria-label="Decrease count"
           >
@@ -540,10 +572,7 @@ export default function RoomClient({ code }: Props) {
             >
               <span className="font-medium">{member.display_name}</span>
               <span className="tabular-nums text-[var(--muted)]">
-                {(isMe(member)
-                  ? Math.max(member.taps, myTaps)
-                  : member.taps
-                ).toLocaleString()}
+                {(isMe(member) ? personalCount : member.taps).toLocaleString()}
               </span>
             </li>
           ))}

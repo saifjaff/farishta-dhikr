@@ -55,18 +55,13 @@ begin
     raise exception 'Room not found';
   end if;
 
-  if p_display_name is not null and length(trim(p_display_name)) > 0 and p_delta > 0 then
+  if p_display_name is not null and length(trim(p_display_name)) > 0 then
     insert into public.room_members (room_id, display_name, taps, last_seen)
-    values (v_room.id, trim(p_display_name), p_delta, now())
+    values (v_room.id, trim(p_display_name), greatest(0, p_delta), now())
     on conflict (room_id, display_name)
     do update set
-      taps = public.room_members.taps + excluded.taps,
+      taps = greatest(0, public.room_members.taps + p_delta),
       last_seen = now();
-  elsif p_display_name is not null and length(trim(p_display_name)) > 0 then
-    insert into public.room_members (room_id, display_name, last_seen)
-    values (v_room.id, trim(p_display_name), now())
-    on conflict (room_id, display_name)
-    do update set last_seen = now();
   end if;
 
   return v_room;

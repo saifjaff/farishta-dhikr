@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DhikrPreview from "@/components/DhikrPreview";
 import { roomDhikr } from "@/lib/dhikr";
 import { getSavedName, saveName } from "@/lib/storage";
@@ -22,17 +22,31 @@ export default function RoomClient({ code }: Props) {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [name, setName] = useState("");
   const [nameDraft, setNameDraft] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [bump, setBump] = useState(false);
   const [dhikrOpen, setDhikrOpen] = useState(true);
   const [countMode, setCountMode] = useState<CountMode>("group");
+  // Local taps the server hasn't confirmed yet, layered on top of room.count.
+  const [unconfirmed, setUnconfirmed] = useState(0);
+  // Your own taps only ever go up, so the higher of local vs server is correct.
+  const [myTaps, setMyTaps] = useState(0);
+
+  const pendingRef = useRef(0);
+  const inflightRef = useRef(0);
+  const sendingRef = useRef(false);
+  const settleUntilRef = useRef(0);
+  const displayNameRef = useRef("");
+  const roomIdRef = useRef("");
+  const membersTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const groupCount = Math.max(0, (room?.count ?? 0) + unconfirmed);
 
   const progress = useMemo(() => {
     if (!room || room.goal <= 0) return 0;
-    return Math.min(100, (room.count / room.goal) * 100);
-  }, [room]);
+    return Math.min(100, (groupCount / room.goal) * 100);
+  }, [room, groupCount]);
 
   const progressLabel = useMemo(() => {
     if (!room) return "0%";
@@ -47,16 +61,20 @@ export default function RoomClient({ code }: Props) {
     [room],
   );
 
-  const personalCount = useMemo(() => {
-    const me = name.trim().toLowerCase();
-    if (!me) return 0;
-    const member = members.find(
-      (m) => m.display_name.trim().toLowerCase() === me,
-    );
-    return member?.taps ?? 0;
-  }, [members, name]);
+  const isMe = useCallback(
+    (member: RoomMember) =>
+      member.display_name.trim().toLowerCase() === name.trim().toLowerCase(),
+    [name],
+  );
 
-  const displayCount = countMode === "personal" ? personalCount : (room?.count ?? 0);
+  const serverMyTaps = useMemo(() => {
+    if (!name.trim()) return 0;
+    return members.find(isMe)?.taps ?? 0;
+  }, [members, name, isMe]);
+
+  const personalCount = Math.max(myTaps, serverMyTaps);
+
+  const displayCount = countMode === "personal" ? personalCount : groupCount;
 
   const loadMembers = useCallback(async (roomId: string) => {
     const supabase = getSupabase();
@@ -69,10 +87,75 @@ export default function RoomClient({ code }: Props) {
     setMembers((data ?? []) as RoomMember[]);
   }, []);
 
+  const scheduleMembersReload = useCallback(() => {
+    if (membersTimerRef.current) return;
+    membersTimerRef.current = setTimeout(() => {
+      membersTimerRef.current = null;
+      if (roomIdRef.current) void loadMembers(roomIdRef.current);
+    }, 500);
+  }, [loadMembers]);
+
+  const syncUnconfirmed = useCallback(() => {
+    setUnconfirmed(pendingRef.current + inflightRef.current);
+  }, []);
+
+  const scheduleReconcile = useCallback(() => {
+    if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current);
+    reconcileTimerRef.current = setTimeout(async () => {
+      reconcileTimerRef.current = null;
+      if (sendingRef.current || pendingRef.current !== 0) return;
+      const { data } = await getSupabase()
+        .from("rooms")
+        .select("*")
+        .eq("code", roomCode)
+        .single();
+      if (data && !sendingRef.current && pendingRef.current === 0) {
+        setRoom(data as Room);
+      }
+    }, 400);
+  }, [roomCode]);
+
+  // One write in flight at a time; taps made meanwhile are sent together next.
+  const drain = useCallback(async () => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      while (pendingRef.current !== 0) {
+        const delta = pendingRef.current;
+        pendingRef.current = 0;
+        inflightRef.current = delta;
+        try {
+          const { data, error: rpcError } = await getSupabase().rpc(
+            "adjust_room_count",
+            {
+              p_code: roomCode,
+              p_delta: delta,
+              p_display_name: displayNameRef.current || null,
+            },
+          );
+          if (rpcError) throw rpcError;
+          const updated = (Array.isArray(data) ? data[0] : data) as Room;
+          settleUntilRef.current = Date.now() + 1000;
+          inflightRef.current = 0;
+          setRoom(updated);
+          syncUnconfirmed();
+        } catch (err) {
+          inflightRef.current = 0;
+          syncUnconfirmed();
+          setError(err instanceof Error ? err.message : "Update failed.");
+        }
+      }
+    } finally {
+      sendingRef.current = false;
+      scheduleReconcile();
+    }
+  }, [roomCode, syncUnconfirmed, scheduleReconcile]);
+
   useEffect(() => {
     const saved = getSavedName();
     setName(saved);
     setNameDraft(saved);
+    displayNameRef.current = saved.trim();
     const hidden = localStorage.getItem(dhikrHiddenKey(roomCode)) === "1";
     setDhikrOpen(!hidden);
   }, [roomCode]);
@@ -102,6 +185,7 @@ export default function RoomClient({ code }: Props) {
         if (cancelled) return;
 
         const current = data as Room;
+        roomIdRef.current = current.id;
         setRoom(current);
         await loadMembers(current.id);
 
@@ -125,9 +209,23 @@ export default function RoomClient({ code }: Props) {
               filter: `id=eq.${current.id}`,
             },
             (payload) => {
-              setRoom(payload.new as Room);
-              setBump(true);
-              window.setTimeout(() => setBump(false), 220);
+              // While our own write is in flight, its reply is the source of truth.
+              if (sendingRef.current) return;
+              const next = payload.new as Room;
+              setRoom((prev) => {
+                if (!prev) return next;
+                if (
+                  next.count < prev.count &&
+                  Date.now() < settleUntilRef.current
+                ) {
+                  return prev;
+                }
+                if (next.count !== prev.count) {
+                  setBump(true);
+                  window.setTimeout(() => setBump(false), 220);
+                }
+                return { ...prev, ...next };
+              });
             },
           )
           .on(
@@ -139,7 +237,7 @@ export default function RoomClient({ code }: Props) {
               filter: `room_id=eq.${current.id}`,
             },
             () => {
-              void loadMembers(current.id);
+              scheduleMembersReload();
             },
           )
           .subscribe();
@@ -156,11 +254,15 @@ export default function RoomClient({ code }: Props) {
 
     return () => {
       cancelled = true;
+      if (membersTimerRef.current) clearTimeout(membersTimerRef.current);
+      if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current);
+      membersTimerRef.current = null;
+      reconcileTimerRef.current = null;
       if (channel) {
         void getSupabase().removeChannel(channel);
       }
     };
-  }, [roomCode, loadMembers]);
+  }, [roomCode, loadMembers, scheduleMembersReload]);
 
   async function ensureName(): Promise<string | null> {
     const trimmed = name.trim() || nameDraft.trim();
@@ -172,6 +274,8 @@ export default function RoomClient({ code }: Props) {
       saveName(trimmed);
       setName(trimmed);
       setNameDraft(trimmed);
+      displayNameRef.current = trimmed;
+      setMyTaps(0);
       await getSupabase().rpc("join_room", {
         p_code: roomCode,
         p_display_name: trimmed,
@@ -180,69 +284,24 @@ export default function RoomClient({ code }: Props) {
     return trimmed;
   }
 
-  async function adjust(delta: number) {
-    if (busy) return;
+  function adjust(delta: number) {
     setError(null);
-    const displayName = await ensureName();
-    if (!displayName) return;
-
-    setBusy(true);
-    // Optimistic UI — group total always; personal taps only on +
-    setRoom((prev) =>
-      prev
-        ? { ...prev, count: Math.max(0, prev.count + delta) }
-        : prev,
-    );
-    if (delta > 0) {
-      setMembers((prev) => {
-        const me = displayName.trim().toLowerCase();
-        const idx = prev.findIndex(
-          (m) => m.display_name.trim().toLowerCase() === me,
-        );
-        if (idx === -1) {
-          return [
-            ...prev,
-            {
-              id: `local-${displayName}`,
-              room_id: room?.id ?? "",
-              display_name: displayName,
-              taps: delta,
-              last_seen: new Date().toISOString(),
-            },
-          ];
-        }
-        return prev.map((m, i) =>
-          i === idx ? { ...m, taps: m.taps + delta } : m,
-        );
+    if (!displayNameRef.current) {
+      void ensureName().then((n) => {
+        if (n) adjust(delta);
       });
+      return;
+    }
+    if (delta < 0 && groupCount <= 0) return;
+
+    pendingRef.current += delta;
+    syncUnconfirmed();
+    if (delta > 0) {
+      setMyTaps((t) => Math.max(t, serverMyTaps) + delta);
     }
     setBump(true);
     window.setTimeout(() => setBump(false), 220);
-
-    try {
-      const { data, error: rpcError } = await getSupabase().rpc(
-        "adjust_room_count",
-        {
-          p_code: roomCode,
-          p_delta: delta,
-          p_display_name: displayName,
-        },
-      );
-      if (rpcError) throw rpcError;
-      const updated = (Array.isArray(data) ? data[0] : data) as Room;
-      setRoom(updated);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed.");
-      // Reload truth from server
-      const { data } = await getSupabase()
-        .from("rooms")
-        .select("*")
-        .eq("code", roomCode)
-        .single();
-      if (data) setRoom(data as Room);
-    } finally {
-      setBusy(false);
-    }
+    void drain();
   }
 
   async function saveDisplayName(e: React.FormEvent) {
@@ -251,6 +310,8 @@ export default function RoomClient({ code }: Props) {
     if (!trimmed) return;
     saveName(trimmed);
     setName(trimmed);
+    displayNameRef.current = trimmed;
+    setMyTaps(0);
     setError(null);
     try {
       await getSupabase().rpc("join_room", {
@@ -390,12 +451,12 @@ export default function RoomClient({ code }: Props) {
         <div className="mx-auto mt-6 h-2.5 w-full max-w-xs overflow-hidden rounded-full bg-[rgba(16,41,36,0.08)]">
           <div
             className="progress-fill h-full rounded-full bg-[var(--accent)]"
-            style={{ width: `${Math.max(progress, room.count > 0 ? 0.4 : 0)}%` }}
+            style={{ width: `${Math.max(progress, groupCount > 0 ? 0.4 : 0)}%` }}
           />
         </div>
         <p className="mt-2 tabular-nums text-sm text-[var(--muted)]">
           <span className="font-semibold text-[var(--ink)]">
-            {room.count.toLocaleString()}
+            {groupCount.toLocaleString()}
           </span>
           {" of "}
           {room.goal.toLocaleString()}
@@ -407,8 +468,8 @@ export default function RoomClient({ code }: Props) {
         <div className="mt-8 grid grid-cols-2 gap-3">
           <button
             type="button"
-            onClick={() => void adjust(-1)}
-            disabled={busy || room.count <= 0}
+            onClick={() => adjust(-1)}
+            disabled={groupCount <= 0}
             className="tap-btn rounded-3xl border border-[rgba(16,41,36,0.12)] bg-white/80 py-6 text-4xl font-light text-[var(--ink)] disabled:opacity-40"
             aria-label="Decrease count"
           >
@@ -416,8 +477,7 @@ export default function RoomClient({ code }: Props) {
           </button>
           <button
             type="button"
-            onClick={() => void adjust(1)}
-            disabled={busy}
+            onClick={() => adjust(1)}
             className="tap-btn rounded-3xl bg-[var(--accent)] py-6 text-4xl font-light text-white shadow-[0_16px_32px_rgba(47,143,120,0.35)] disabled:opacity-60"
             aria-label="Increase count"
           >
@@ -480,7 +540,10 @@ export default function RoomClient({ code }: Props) {
             >
               <span className="font-medium">{member.display_name}</span>
               <span className="tabular-nums text-[var(--muted)]">
-                {member.taps.toLocaleString()}
+                {(isMe(member)
+                  ? Math.max(member.taps, myTaps)
+                  : member.taps
+                ).toLocaleString()}
               </span>
             </li>
           ))}

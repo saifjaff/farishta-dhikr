@@ -58,6 +58,7 @@ body {
     background 120ms ease;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 
 .tap-btn:active {

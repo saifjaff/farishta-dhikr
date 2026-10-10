@@ -15,7 +15,7 @@ export function getSupabase(): SupabaseClient {
   }
 
   client = createClient(url, key, {
-    realtime: { params: { eventsPerSecond: 40 } },
+    realtime: { params: { eventsPerSecond: 20 } },
   });
 
   return client;

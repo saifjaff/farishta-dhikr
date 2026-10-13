@@ -13,6 +13,9 @@ type Props = {
 };
 
 const dhikrHiddenKey = (code: string) => `family-dhikr:hide-dhikr:${code}`;
+const progressHiddenKey = (code: string) =>
+  `family-dhikr:hide-progress:${code}`;
+const familyHiddenKey = (code: string) => `family-dhikr:hide-family:${code}`;
 
 type CountMode = "group" | "personal";
 
@@ -27,6 +30,9 @@ export default function RoomClient({ code }: Props) {
   const [bump, setBump] = useState(false);
   const [dhikrOpen, setDhikrOpen] = useState(true);
   const [countMode, setCountMode] = useState<CountMode>("group");
+  const [progressOpen, setProgressOpen] = useState(true);
+  const [familyOpen, setFamilyOpen] = useState(true);
+  const countModeRef = useRef<CountMode>("group");
   // Local taps the server hasn't confirmed yet, layered on top of room.count.
   const [unconfirmed, setUnconfirmed] = useState(0);
   // Moves instantly on your taps; re-synced from the server once your writes settle.
@@ -57,10 +63,7 @@ export default function RoomClient({ code }: Props) {
     return `${Math.round(progress)}%`;
   }, [room, progress]);
 
-  const activeDhikr = useMemo(
-    () => (room ? roomDhikr(room) : null),
-    [room],
-  );
+  const activeDhikr = useMemo(() => (room ? roomDhikr(room) : null), [room]);
 
   const isMe = useCallback(
     (member: RoomMember) =>
@@ -166,12 +169,34 @@ export default function RoomClient({ code }: Props) {
     displayNameRef.current = saved.trim();
     const hidden = localStorage.getItem(dhikrHiddenKey(roomCode)) === "1";
     setDhikrOpen(!hidden);
+    setProgressOpen(localStorage.getItem(progressHiddenKey(roomCode)) !== "1");
+    setFamilyOpen(localStorage.getItem(familyHiddenKey(roomCode)) !== "1");
   }, [roomCode]);
+
+  useEffect(() => {
+    countModeRef.current = countMode;
+  }, [countMode]);
 
   function toggleDhikr() {
     setDhikrOpen((open) => {
       const next = !open;
       localStorage.setItem(dhikrHiddenKey(roomCode), next ? "0" : "1");
+      return next;
+    });
+  }
+
+  function toggleProgress() {
+    setProgressOpen((open) => {
+      const next = !open;
+      localStorage.setItem(progressHiddenKey(roomCode), next ? "0" : "1");
+      return next;
+    });
+  }
+
+  function toggleFamily() {
+    setFamilyOpen((open) => {
+      const next = !open;
+      localStorage.setItem(familyHiddenKey(roomCode), next ? "0" : "1");
       return next;
     });
   }
@@ -228,7 +253,11 @@ export default function RoomClient({ code }: Props) {
                 ) {
                   return prev;
                 }
-                if (next.count !== prev.count) {
+                // Others' taps don't change your personal number, so don't animate it.
+                if (
+                  next.count !== prev.count &&
+                  countModeRef.current === "group"
+                ) {
                   setBump(true);
                   window.setTimeout(() => setBump(false), 220);
                 }
@@ -472,27 +501,50 @@ export default function RoomClient({ code }: Props) {
         <p
           className={`font-display text-7xl leading-none tracking-tight text-[var(--ink)] sm:text-8xl ${
             bump ? "count-bump" : ""
-          } ${progress >= 100 ? "animate-count-pulse" : ""}`}
+          } ${
+            progress >= 100 && countMode === "group"
+              ? "animate-count-pulse"
+              : ""
+          }`}
         >
           {displayCount.toLocaleString()}
         </p>
 
-        <div className="mx-auto mt-6 h-2.5 w-full max-w-xs overflow-hidden rounded-full bg-[rgba(16,41,36,0.08)]">
-          <div
-            className="progress-fill h-full rounded-full bg-[var(--accent)]"
-            style={{ width: `${Math.max(progress, groupCount > 0 ? 0.4 : 0)}%` }}
-          />
-        </div>
-        <p className="mt-2 tabular-nums text-sm text-[var(--muted)]">
-          <span className="font-semibold text-[var(--ink)]">
-            {groupCount.toLocaleString()}
-          </span>
-          {" of "}
-          {room.goal.toLocaleString()}
-          {" · "}
-          {progressLabel}
-          {progress >= 100 ? " · Goal reached, mashaAllah" : ""}
-        </p>
+        {progressOpen ? (
+          <button
+            type="button"
+            onClick={toggleProgress}
+            className="mx-auto mt-6 block w-full max-w-xs"
+            aria-label="Hide progress"
+          >
+            <div className="h-2.5 w-full overflow-hidden rounded-full bg-[rgba(16,41,36,0.08)]">
+              <div
+                className="progress-fill h-full rounded-full bg-[var(--accent)]"
+                style={{
+                  width: `${Math.max(progress, groupCount > 0 ? 0.4 : 0)}%`,
+                }}
+              />
+            </div>
+            <p className="mt-2 tabular-nums text-sm text-[var(--muted)]">
+              <span className="font-semibold text-[var(--ink)]">
+                {groupCount.toLocaleString()}
+              </span>
+              {" of "}
+              {room.goal.toLocaleString()}
+              {" · "}
+              {progressLabel}
+              {progress >= 100 ? " · Goal reached, mashaAllah" : ""}
+            </p>
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={toggleProgress}
+            className="mx-auto mt-6 block text-xs font-medium tracking-[0.12em] text-[var(--muted)] uppercase opacity-70"
+          >
+            Show progress
+          </button>
+        )}
 
         <div className="mt-8 grid grid-cols-2 gap-3">
           <button
@@ -549,34 +601,58 @@ export default function RoomClient({ code }: Props) {
               <p className="mb-2 text-center text-sm font-medium text-[var(--accent-deep)]">
                 {activeDhikr.label}
               </p>
-              <DhikrPreview dhikr={activeDhikr} className="border-0 bg-transparent px-0 py-1" />
+              <DhikrPreview
+                dhikr={activeDhikr}
+                className="border-0 bg-transparent px-0 py-1"
+              />
             </div>
           )}
         </section>
       )}
 
       <section className="mt-6 animate-rise">
-        <h2 className="mb-3 text-sm font-semibold tracking-[0.16em] text-[var(--muted)] uppercase">
-          Family in this room
-        </h2>
-        <ul className="glass divide-y divide-[rgba(16,41,36,0.06)] overflow-hidden rounded-2xl">
-          {members.length === 0 && (
-            <li className="px-4 py-4 text-sm text-[var(--muted)]">
-              No one has joined yet.
-            </li>
-          )}
-          {members.map((member) => (
-            <li
-              key={member.id}
-              className="flex items-center justify-between px-4 py-3"
-            >
-              <span className="font-medium">{member.display_name}</span>
-              <span className="tabular-nums text-[var(--muted)]">
-                {(isMe(member) ? personalCount : member.taps).toLocaleString()}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <button
+          type="button"
+          onClick={toggleFamily}
+          className="mb-3 flex w-full items-center justify-between text-left"
+          aria-expanded={familyOpen}
+        >
+          <h2 className="text-sm font-semibold tracking-[0.16em] text-[var(--muted)] uppercase">
+            Family in this room
+            {!familyOpen && members.length > 0 ? ` · ${members.length}` : ""}
+          </h2>
+          <span
+            className={`text-[var(--muted)] transition-transform ${
+              familyOpen ? "" : "rotate-180"
+            }`}
+            aria-hidden
+          >
+            ⌃
+          </span>
+        </button>
+        {familyOpen && (
+          <ul className="glass divide-y divide-[rgba(16,41,36,0.06)] overflow-hidden rounded-2xl">
+            {members.length === 0 && (
+              <li className="px-4 py-4 text-sm text-[var(--muted)]">
+                No one has joined yet.
+              </li>
+            )}
+            {members.map((member) => (
+              <li
+                key={member.id}
+                className="flex items-center justify-between px-4 py-3"
+              >
+                <span className="font-medium">{member.display_name}</span>
+                <span className="tabular-nums text-[var(--muted)]">
+                  {(isMe(member)
+                    ? personalCount
+                    : member.taps
+                  ).toLocaleString()}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     </main>
   );

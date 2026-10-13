@@ -1,336 +1,154 @@
-"use client";
-
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import DhikrPreview from "@/components/DhikrPreview";
+import HomeClient from "./HomeClient";
+import { COMMON_DHIKRS } from "@/lib/dhikr";
 import {
-  COMMON_DHIKRS,
-  DEFAULT_DHIKR,
-  type Dhikr,
-} from "@/lib/dhikr";
-import { getSavedName, saveName } from "@/lib/storage";
-import { getSupabase, isSupabaseConfigured } from "@/lib/supabase";
-import type { Room } from "@/lib/types";
+  brandName,
+  faqs,
+  siteDescription,
+  siteName,
+  siteUrl,
+} from "@/lib/site";
 
-type Mode = "create" | "join";
-type DhikrMode = "standard" | "custom";
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": `${siteUrl}/#organization`,
+      name: brandName,
+      url: siteUrl,
+      logo: `${siteUrl}/logo.png`,
+    },
+    {
+      "@type": "WebSite",
+      "@id": `${siteUrl}/#website`,
+      name: siteName,
+      alternateName: ["Family Dhikr by Farishta", "Farishta Dhikr"],
+      url: siteUrl,
+      publisher: { "@id": `${siteUrl}/#organization` },
+      inLanguage: "en",
+    },
+    {
+      "@type": "WebApplication",
+      "@id": `${siteUrl}/#app`,
+      name: siteName,
+      alternateName: "Farishta Family Dhikr",
+      url: siteUrl,
+      description: siteDescription,
+      applicationCategory: "LifestyleApplication",
+      applicationSubCategory: "Religion & Spirituality",
+      operatingSystem: "Any (web browser)",
+      browserRequirements: "Requires a modern web browser",
+      isAccessibleForFree: true,
+      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      publisher: { "@id": `${siteUrl}/#organization` },
+      image: `${siteUrl}/og.png`,
+      featureList: [
+        "Shared live dhikr rooms with a join code",
+        "Real-time group total toward a goal",
+        "Group and personal counts",
+        "Arabic, transliteration and meaning for each dhikr",
+        "Custom dhikr",
+        "Works worldwide in any browser",
+      ],
+    },
+    {
+      "@type": "FAQPage",
+      "@id": `${siteUrl}/#faq`,
+      mainEntity: faqs.map((f) => ({
+        "@type": "Question",
+        name: f.question,
+        acceptedAnswer: { "@type": "Answer", text: f.answer },
+      })),
+    },
+  ],
+};
 
 export default function HomePage() {
-  const router = useRouter();
-  const [mode, setMode] = useState<Mode>("create");
-  const [name, setName] = useState("");
-  const [roomName, setRoomName] = useState("");
-  const [goal, setGoal] = useState("12000");
-  const [code, setCode] = useState("");
-  const [dhikrMode, setDhikrMode] = useState<DhikrMode>("standard");
-  const [dhikrKey, setDhikrKey] = useState(DEFAULT_DHIKR.key);
-  const [customLabel, setCustomLabel] = useState("");
-  const [customArabic, setCustomArabic] = useState("");
-  const [customTransliteration, setCustomTransliteration] = useState("");
-  const [customMeaning, setCustomMeaning] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const configured = isSupabaseConfigured();
-
-  const selectedDhikr: Dhikr = useMemo(() => {
-    if (dhikrMode === "custom") {
-      return {
-        key: "custom",
-        label: customLabel.trim() || "Custom dhikr",
-        arabic: customArabic.trim(),
-        transliteration: customTransliteration.trim(),
-        meaning: customMeaning.trim(),
-      };
-    }
-    return COMMON_DHIKRS.find((d) => d.key === dhikrKey) ?? DEFAULT_DHIKR;
-  }, [
-    dhikrMode,
-    dhikrKey,
-    customLabel,
-    customArabic,
-    customTransliteration,
-    customMeaning,
-  ]);
-
-  useEffect(() => {
-    setName(getSavedName());
-  }, []);
-
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    setError(null);
-
-    const displayName = name.trim();
-    if (!displayName) {
-      setError("Enter your name so the family can see who’s counting.");
-      return;
-    }
-    if (!configured) {
-      setError("Supabase is not configured yet. Add env keys and run the schema.");
-      return;
-    }
-
-    if (mode === "create" && dhikrMode === "custom" && !customLabel.trim()) {
-      setError("Give your custom dhikr a name.");
-      return;
-    }
-
-    saveName(displayName);
-    setLoading(true);
-
-    try {
-      const supabase = getSupabase();
-
-      if (mode === "create") {
-        const title = roomName.trim() || "Family Dhikr";
-        const goalNum = Math.max(1, Number(goal) || 12000);
-        const { data, error: rpcError } = await supabase.rpc("create_room", {
-          p_name: title,
-          p_goal: goalNum,
-          p_display_name: displayName,
-          p_dhikr_key: selectedDhikr.key,
-          p_dhikr_label: selectedDhikr.label,
-          p_dhikr_arabic: selectedDhikr.arabic,
-          p_dhikr_transliteration: selectedDhikr.transliteration,
-          p_dhikr_meaning: selectedDhikr.meaning,
-        });
-        if (rpcError) throw rpcError;
-        const room = (Array.isArray(data) ? data[0] : data) as Room;
-        router.push(`/room/${room.code}`);
-        return;
-      }
-
-      const joinCode = code.trim().toUpperCase();
-      if (joinCode.length < 4) {
-        setError("Enter the room code from your family.");
-        setLoading(false);
-        return;
-      }
-
-      const { data, error: rpcError } = await supabase.rpc("join_room", {
-        p_code: joinCode,
-        p_display_name: displayName,
-      });
-      if (rpcError) throw rpcError;
-      const room = (Array.isArray(data) ? data[0] : data) as Room;
-      router.push(`/room/${room.code}`);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Something went wrong. Try again.";
-      setError(message);
-      setLoading(false);
-    }
-  }
-
   return (
-    <main className="mx-auto flex min-h-full w-full max-w-lg flex-col px-5 pb-10 pt-10 sm:pt-16">
-      <header className="animate-rise mb-10 text-center">
-        <p className="mb-3 text-sm font-medium tracking-[0.22em] text-[var(--accent-deep)] uppercase">
-          Shared counting
-        </p>
-        <h1 className="font-display text-5xl leading-none tracking-tight text-[var(--ink)] sm:text-6xl">
-          Family Dhikr
-        </h1>
-        <p className="mx-auto mt-4 max-w-sm text-base leading-relaxed text-[var(--muted)]">
-          Create a room, invite everyone with a code, and count toward your goal
-          together.
-        </p>
-      </header>
+    <main className="min-h-full">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c"),
+        }}
+      />
+      <HomeClient />
 
-      <section className="glass animate-rise-delay rounded-[28px] p-6 sm:p-8">
-        <div className="mb-6 grid grid-cols-2 gap-2 rounded-2xl bg-[rgba(16,41,36,0.06)] p-1">
-          <button
-            type="button"
-            onClick={() => setMode("create")}
-            className={`rounded-xl px-3 py-2.5 text-sm font-semibold transition ${
-              mode === "create"
-                ? "bg-white text-[var(--ink)] shadow-sm"
-                : "text-[var(--muted)]"
-            }`}
-          >
-            Create room
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("join")}
-            className={`rounded-xl px-3 py-2.5 text-sm font-semibold transition ${
-              mode === "join"
-                ? "bg-white text-[var(--ink)] shadow-sm"
-                : "text-[var(--muted)]"
-            }`}
-          >
-            Join room
-          </button>
-        </div>
-
-        <form onSubmit={onSubmit} className="space-y-4">
-          <label className="block">
-            <span className="mb-1.5 block text-sm font-medium text-[var(--muted)]">
-              Your name
-            </span>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Saif"
-              className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-              autoComplete="nickname"
-              maxLength={40}
-            />
-          </label>
-
-          {mode === "create" ? (
-            <>
-              <label className="block">
-                <span className="mb-1.5 block text-sm font-medium text-[var(--muted)]">
-                  Room name
-                </span>
-                <input
-                  value={roomName}
-                  onChange={(e) => setRoomName(e.target.value)}
-                  placeholder="Tonight’s dhikr"
-                  className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-                  maxLength={60}
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1.5 block text-sm font-medium text-[var(--muted)]">
-                  Goal (total count)
-                </span>
-                <input
-                  value={goal}
-                  onChange={(e) => setGoal(e.target.value.replace(/[^\d]/g, ""))}
-                  inputMode="numeric"
-                  className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-                />
-              </label>
-
-              <div className="pt-1">
-                <p className="mb-2 text-sm font-medium text-[var(--muted)]">
-                  Dhikr for this room
-                </p>
-                <div className="mb-3 grid grid-cols-2 gap-2 rounded-2xl bg-[rgba(16,41,36,0.06)] p-1">
-                  <button
-                    type="button"
-                    onClick={() => setDhikrMode("standard")}
-                    className={`rounded-xl px-3 py-2 text-sm font-semibold transition ${
-                      dhikrMode === "standard"
-                        ? "bg-[var(--accent)] text-white shadow-sm"
-                        : "text-[var(--muted)]"
-                    }`}
-                  >
-                    Standard
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDhikrMode("custom")}
-                    className={`rounded-xl px-3 py-2 text-sm font-semibold transition ${
-                      dhikrMode === "custom"
-                        ? "bg-[var(--accent)] text-white shadow-sm"
-                        : "text-[var(--muted)]"
-                    }`}
-                  >
-                    Custom
-                  </button>
-                </div>
-
-                {dhikrMode === "standard" ? (
-                  <label className="block">
-                    <span className="sr-only">Choose dhikr</span>
-                    <select
-                      value={dhikrKey}
-                      onChange={(e) => setDhikrKey(e.target.value)}
-                      className="w-full appearance-none rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-                    >
-                      {COMMON_DHIKRS.map((d) => (
-                        <option key={d.key} value={d.key}>
-                          {d.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  <div className="space-y-3">
-                    <input
-                      value={customLabel}
-                      onChange={(e) => setCustomLabel(e.target.value)}
-                      placeholder="Dhikr name"
-                      className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-                      maxLength={80}
-                    />
-                    <input
-                      value={customArabic}
-                      onChange={(e) => setCustomArabic(e.target.value)}
-                      placeholder="Arabic (optional)"
-                      dir="auto"
-                      className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-                      maxLength={120}
-                    />
-                    <input
-                      value={customTransliteration}
-                      onChange={(e) => setCustomTransliteration(e.target.value)}
-                      placeholder="Transliteration"
-                      className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-                      maxLength={120}
-                    />
-                    <input
-                      value={customMeaning}
-                      onChange={(e) => setCustomMeaning(e.target.value)}
-                      placeholder="Meaning (optional)"
-                      className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
-                      maxLength={160}
-                    />
-                  </div>
-                )}
-
-                {(selectedDhikr.arabic ||
-                  selectedDhikr.transliteration ||
-                  selectedDhikr.meaning) && (
-                  <DhikrPreview dhikr={selectedDhikr} className="mt-3" />
-                )}
-              </div>
-            </>
-          ) : (
-            <label className="block">
-              <span className="mb-1.5 block text-sm font-medium text-[var(--muted)]">
-                Room code
+      <div className="mx-auto w-full max-w-lg px-5 pb-16">
+        <section className="glass rounded-[28px] p-6 sm:p-8">
+          <h2 className="font-display text-2xl text-[var(--ink)]">
+            Count dhikr together, wherever your family is
+          </h2>
+          <p className="mt-3 text-sm leading-relaxed text-[var(--muted)]">
+            Family Dhikr is a free, live tasbih counter by {brandName}. One
+            person creates a room, picks a dhikr and a goal, and shares the
+            code. Everyone taps on their own phone, and the shared total updates
+            in real time for the whole family, across the globe.
+          </p>
+          <ol className="mt-5 space-y-2 text-sm text-[var(--ink)]">
+            <li>
+              <span className="font-semibold">1. Create a room</span>
+              <span className="text-[var(--muted)]">
+                {" "}
+                with a dhikr and a goal, like 12,000.
               </span>
-              <input
-                value={code}
-                onChange={(e) => setCode(e.target.value.toUpperCase())}
-                placeholder="ABC123"
-                className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-center font-display text-2xl tracking-[0.35em] outline-none ring-[var(--ring)] focus:ring-4"
-                maxLength={8}
-                autoCapitalize="characters"
-              />
-            </label>
-          )}
+            </li>
+            <li>
+              <span className="font-semibold">2. Share the code</span>
+              <span className="text-[var(--muted)]">
+                {" "}
+                on WhatsApp or anywhere.
+              </span>
+            </li>
+            <li>
+              <span className="font-semibold">3. Count together</span>
+              <span className="text-[var(--muted)]">
+                {" "}
+                and watch the family total rise live.
+              </span>
+            </li>
+          </ol>
+        </section>
 
-          {error && (
-            <p className="rounded-xl bg-[#f8e8e4] px-3 py-2 text-sm text-[#8a3b2d]">
-              {error}
-            </p>
-          )}
+        <section className="mt-6">
+          <h2 className="mb-3 text-sm font-semibold tracking-[0.16em] text-[var(--muted)] uppercase">
+            Dhikr you can count
+          </h2>
+          <ul className="flex flex-wrap gap-2">
+            {COMMON_DHIKRS.map((d) => (
+              <li
+                key={d.key}
+                className="rounded-full bg-white/70 px-3 py-1.5 text-sm text-[var(--ink)]"
+                title={d.meaning}
+              >
+                {d.label}
+              </li>
+            ))}
+          </ul>
+        </section>
 
-          {!configured && (
-            <p className="rounded-xl bg-[#fff4d8] px-3 py-2 text-sm text-[#7a5a12]">
-              Add your Supabase URL and anon key to <code>.env.local</code>, then
-              run <code>supabase/schema.sql</code> in the SQL editor.
-            </p>
-          )}
+        <section className="mt-8">
+          <h2 className="mb-3 text-sm font-semibold tracking-[0.16em] text-[var(--muted)] uppercase">
+            Questions
+          </h2>
+          <div className="glass divide-y divide-[rgba(16,41,36,0.06)] overflow-hidden rounded-2xl">
+            {faqs.map((f) => (
+              <details key={f.question} className="group px-4 py-3">
+                <summary className="cursor-pointer list-none font-medium text-[var(--ink)]">
+                  {f.question}
+                </summary>
+                <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
+                  {f.answer}
+                </p>
+              </details>
+            ))}
+          </div>
+        </section>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="tap-btn w-full rounded-2xl bg-[var(--accent)] px-4 py-3.5 text-base font-semibold text-white shadow-[0_12px_28px_rgba(47,143,120,0.35)] hover:bg-[var(--accent-deep)] disabled:opacity-60"
-          >
-            {loading
-              ? "Opening…"
-              : mode === "create"
-                ? "Create & open room"
-                : "Join room"}
-          </button>
-        </form>
-      </section>
+        <p className="mt-8 text-center text-xs text-[var(--muted)]">
+          Family Dhikr is made by {brandName}.
+        </p>
+      </div>
     </main>
   );
 }

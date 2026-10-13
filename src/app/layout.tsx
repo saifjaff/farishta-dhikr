@@ -2,6 +2,14 @@ import type { Metadata, Viewport } from "next";
 import { Analytics } from "@vercel/analytics/next";
 import { Fraunces, Outfit } from "next/font/google";
 import "./globals.css";
+import {
+  brandName,
+  shareDescription,
+  siteDescription,
+  siteName,
+  siteTitle,
+  siteUrl,
+} from "@/lib/site";
 
 const outfit = Outfit({
   variable: "--font-outfit",
@@ -13,18 +21,31 @@ const fraunces = Fraunces({
   subsets: ["latin"],
 });
 
-const siteUrl = "https://dhikr.saif.space";
-const shareDescription =
-  "Remember Allah together. Create a room and count dhikr with your family.";
-
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: "Family Dhikr",
+    default: siteTitle,
     template: "%s · Family Dhikr",
   },
-  description: shareDescription,
-  applicationName: "Family Dhikr",
+  description: siteDescription,
+  applicationName: siteName,
+  keywords: [
+    "family dhikr",
+    "dhikr counter",
+    "group dhikr",
+    "tasbih counter",
+    "online tasbeeh",
+    "zikr counter",
+    "Farishta",
+    "Farishta app",
+    "Islamic app",
+    "religion app",
+  ],
+  creator: brandName,
+  publisher: brandName,
+  alternates: { canonical: "/" },
+  robots: { index: true, follow: true },
+  category: "religion",
   icons: {
     icon: [{ url: "/icon.png", type: "image/png" }],
     apple: [{ url: "/apple-icon.png", type: "image/png" }],
@@ -32,8 +53,8 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     url: siteUrl,
-    siteName: "Family Dhikr",
-    title: "Family Dhikr",
+    siteName: siteName,
+    title: siteTitle,
     description: shareDescription,
     images: [
       {
@@ -46,7 +67,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary",
-    title: "Family Dhikr",
+    title: siteTitle,
     description: shareDescription,
     images: ["/og.png"],
   },

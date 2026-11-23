@@ -1,4 +1,4 @@
-export const siteUrl = "https://dhikr.saif.space";
+export const siteUrl = "https://dhikr.farishta.si";
 export const siteName = "Family Dhikr";
 export const brandName = "Farishta";
 

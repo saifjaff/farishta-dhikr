@@ -8,9 +8,9 @@ import {
   DEFAULT_DHIKR,
   type Dhikr,
 } from "@/lib/dhikr";
-import { getSavedName, saveName } from "@/lib/storage";
+import { getDeviceId, getSavedName, saveName } from "@/lib/storage";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabase";
-import type { Room } from "@/lib/types";
+import type { EnterRoomResult } from "@/lib/types";
 
 type Mode = "create" | "join";
 type DhikrMode = "standard" | "custom";
@@ -84,10 +84,11 @@ export default function HomeClient() {
       if (mode === "create") {
         const title = roomName.trim() || "Family Dhikr";
         const goalNum = Math.max(1, Number(goal) || 12000);
-        const { data, error: rpcError } = await supabase.rpc("create_room", {
+        const { data, error: rpcError } = await supabase.rpc("create_room_v2", {
           p_name: title,
           p_goal: goalNum,
           p_display_name: displayName,
+          p_device_id: getDeviceId(),
           p_dhikr_key: selectedDhikr.key,
           p_dhikr_label: selectedDhikr.label,
           p_dhikr_arabic: selectedDhikr.arabic,
@@ -95,7 +96,7 @@ export default function HomeClient() {
           p_dhikr_meaning: selectedDhikr.meaning,
         });
         if (rpcError) throw rpcError;
-        const room = (Array.isArray(data) ? data[0] : data) as Room;
+        const { room } = data as EnterRoomResult;
         router.push(`/room/${room.code}`);
         return;
       }
@@ -107,16 +108,23 @@ export default function HomeClient() {
         return;
       }
 
-      const { data, error: rpcError } = await supabase.rpc("join_room", {
+      // The room page links this device to the name saved above.
+      const { error: rpcError } = await supabase.rpc("get_room", {
         p_code: joinCode,
-        p_display_name: displayName,
       });
-      if (rpcError) throw rpcError;
-      const room = (Array.isArray(data) ? data[0] : data) as Room;
-      router.push(`/room/${room.code}`);
+      if (rpcError) {
+        throw new Error(
+          rpcError.message.includes("room_not_found")
+            ? "No room uses that code. Check it with your family."
+            : rpcError.message,
+        );
+      }
+      router.push(`/room/${joinCode}`);
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Something went wrong. Try again.";
+        err && typeof err === "object" && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "Something went wrong. Try again.";
       setError(message);
       setLoading(false);
     }

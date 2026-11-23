@@ -4,6 +4,7 @@ export type Room = {
   name: string;
   goal: number;
   count: number;
+  version: number;
   created_at: string;
   dhikr_key?: string | null;
   dhikr_label?: string | null;
@@ -14,8 +15,18 @@ export type Room = {
 
 export type RoomMember = {
   id: string;
-  room_id: string;
   display_name: string;
   taps: number;
-  last_seen: string;
+};
+
+export type EnterRoomResult = {
+  room: Room;
+  member: RoomMember;
+};
+
+export type CountTapsResult = {
+  count: number;
+  version: number;
+  taps: number;
+  duplicate: boolean;
 };

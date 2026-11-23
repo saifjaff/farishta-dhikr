@@ -4,9 +4,21 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DhikrPreview from "@/components/DhikrPreview";
 import { roomDhikr } from "@/lib/dhikr";
-import { getSavedName, saveName } from "@/lib/storage";
+import {
+  getDeviceId,
+  getSavedName,
+  loadQueue,
+  saveName,
+  saveQueue,
+  type TapQueue,
+} from "@/lib/storage";
 import { getSupabase } from "@/lib/supabase";
-import type { Room, RoomMember } from "@/lib/types";
+import type {
+  CountTapsResult,
+  EnterRoomResult,
+  Room,
+  RoomMember,
+} from "@/lib/types";
 
 type Props = {
   code: string;
@@ -18,37 +30,57 @@ const progressHiddenKey = (code: string) =>
 const familyHiddenKey = (code: string) => `family-dhikr:hide-family:${code}`;
 
 type CountMode = "group" | "personal";
+type Phase = "loading" | "needs-name" | "ready" | "not-found" | "failed";
+
+// Minimum gap between writes while tapping fast; taps in between are sent together.
+const MIN_SEND_GAP_MS = 300;
+const MAX_BATCH = 1000;
+const MEMBERS_POLL_MS = 5000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function errorText(err: unknown): string {
+  if (err && typeof err === "object" && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
+}
 
 export default function RoomClient({ code }: Props) {
   const roomCode = code.toUpperCase();
+  const [phase, setPhase] = useState<Phase>("loading");
   const [room, setRoom] = useState<Room | null>(null);
+  const [me, setMe] = useState<RoomMember | null>(null);
   const [members, setMembers] = useState<RoomMember[]>([]);
-  const [name, setName] = useState("");
   const [nameDraft, setNameDraft] = useState("");
+  const [nameTaken, setNameTaken] = useState(false);
+  const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
   const [copied, setCopied] = useState(false);
   const [bump, setBump] = useState(false);
   const [dhikrOpen, setDhikrOpen] = useState(true);
   const [countMode, setCountMode] = useState<CountMode>("group");
   const [progressOpen, setProgressOpen] = useState(true);
   const [familyOpen, setFamilyOpen] = useState(true);
-  const countModeRef = useRef<CountMode>("group");
-  // Local taps the server hasn't confirmed yet, layered on top of room.count.
+  // Taps not yet confirmed by the server, shown on top of the confirmed counts.
   const [unconfirmed, setUnconfirmed] = useState(0);
-  // Moves instantly on your taps; re-synced from the server once your writes settle.
-  const [myTaps, setMyTaps] = useState(0);
 
-  const writeSeqRef = useRef(0);
-  const pendingRef = useRef(0);
-  const inflightRef = useRef(0);
+  const deviceIdRef = useRef("");
+  const queueRef = useRef<TapQueue>({ pending: 0, inflight: null });
+  const joinedRef = useRef(false);
+  const aliveRef = useRef(true);
   const sendingRef = useRef(false);
-  const settleUntilRef = useRef(0);
-  const displayNameRef = useRef("");
-  const roomIdRef = useRef("");
-  const membersTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSendAtRef = useRef(0);
+  const versionRef = useRef(-1);
+  const countModeRef = useRef<CountMode>("group");
+  const familyOpenRef = useRef(true);
   const reconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const trailingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const groupCount = Math.max(0, (room?.count ?? 0) + unconfirmed);
+  const personalCount = Math.max(0, (me?.taps ?? 0) + unconfirmed);
+  const displayCount = countMode === "personal" ? personalCount : groupCount;
 
   const progress = useMemo(() => {
     if (!room || room.goal <= 0) return 0;
@@ -56,126 +88,299 @@ export default function RoomClient({ code }: Props) {
   }, [room, groupCount]);
 
   const progressLabel = useMemo(() => {
-    if (!room) return "0%";
     if (progress >= 100) return "100%";
     if (progress > 0 && progress < 1) return `${progress.toFixed(2)}%`;
     if (progress < 10) return `${progress.toFixed(1)}%`;
     return `${Math.round(progress)}%`;
-  }, [room, progress]);
+  }, [progress]);
 
   const activeDhikr = useMemo(() => (room ? roomDhikr(room) : null), [room]);
 
-  const isMe = useCallback(
-    (member: RoomMember) =>
-      member.display_name.trim().toLowerCase() === name.trim().toLowerCase(),
-    [name],
-  );
-
-  const personalCount = myTaps;
-
-  const displayCount = countMode === "personal" ? personalCount : groupCount;
-
-  const loadMembers = useCallback(async (roomId: string) => {
-    const isIdle = () => !sendingRef.current && pendingRef.current === 0;
-    const seqAtStart = writeSeqRef.current;
-    const idleAtStart = isIdle();
-    const supabase = getSupabase();
-    const { data, error: membersError } = await supabase
-      .from("room_members")
-      .select("*")
-      .eq("room_id", roomId)
-      .order("taps", { ascending: false });
-    if (membersError) throw membersError;
-    const list = (data ?? []) as RoomMember[];
-    setMembers(list);
-    // Only trust the server's personal count if none of our taps overlapped this fetch.
-    if (idleAtStart && isIdle() && seqAtStart === writeSeqRef.current) {
-      const me = displayNameRef.current.toLowerCase();
-      const mine = me
-        ? list.find((m) => m.display_name.trim().toLowerCase() === me)
-        : undefined;
-      setMyTaps(mine?.taps ?? 0);
-    }
+  const flashBump = useCallback(() => {
+    setBump(true);
+    window.setTimeout(() => setBump(false), 220);
   }, []);
 
-  const scheduleMembersReload = useCallback(() => {
-    if (membersTimerRef.current) return;
-    membersTimerRef.current = setTimeout(() => {
-      membersTimerRef.current = null;
-      if (roomIdRef.current) void loadMembers(roomIdRef.current);
-    }, 500);
-  }, [loadMembers]);
-
-  const syncUnconfirmed = useCallback(() => {
-    setUnconfirmed(pendingRef.current + inflightRef.current);
-  }, []);
-
-  const scheduleReconcile = useCallback(() => {
-    if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current);
-    reconcileTimerRef.current = setTimeout(async () => {
-      reconcileTimerRef.current = null;
-      if (sendingRef.current || pendingRef.current !== 0) return;
-      const { data } = await getSupabase()
-        .from("rooms")
-        .select("*")
-        .eq("code", roomCode)
-        .single();
-      if (data && !sendingRef.current && pendingRef.current === 0) {
-        setRoom(data as Room);
-      }
-    }, 400);
+  const persistQueue = useCallback(() => {
+    saveQueue(roomCode, queueRef.current);
+    const q = queueRef.current;
+    setUnconfirmed(q.pending + (q.inflight?.delta ?? 0));
   }, [roomCode]);
 
-  // One write in flight at a time; taps made meanwhile are sent together next.
+  /** Applies a server room total only if it is newer than what we have. */
+  const applyServerCount = useCallback(
+    (count: number, version: number, fromOthers: boolean) => {
+      if (version <= versionRef.current) return;
+      versionRef.current = version;
+      setRoom((prev) => {
+        if (!prev) return prev;
+        if (
+          fromOthers &&
+          prev.count !== count &&
+          countModeRef.current === "group"
+        ) {
+          setBump(true);
+          window.setTimeout(() => setBump(false), 220);
+        }
+        return { ...prev, count, version };
+      });
+    },
+    [],
+  );
+
+  const loadMembers = useCallback(async () => {
+    const { data, error: rpcError } = await getSupabase().rpc(
+      "get_room_members",
+      { p_code: roomCode },
+    );
+    if (!rpcError && data && aliveRef.current) {
+      setMembers(data as RoomMember[]);
+    }
+  }, [roomCode]);
+
+  const fetchRoom = useCallback(async () => {
+    if (queueRef.current.inflight) return;
+    const { data, error: rpcError } = await getSupabase().rpc("get_room", {
+      p_code: roomCode,
+    });
+    // Our own write may have started meanwhile; its reply is authoritative.
+    if (rpcError || !data || queueRef.current.inflight) return;
+    const next = data as Room;
+    applyServerCount(next.count, next.version, true);
+  }, [roomCode, applyServerCount]);
+
+  const scheduleReconcile = useCallback(
+    (ms: number) => {
+      if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current);
+      reconcileTimerRef.current = setTimeout(() => {
+        reconcileTimerRef.current = null;
+        void fetchRoom();
+      }, ms);
+    },
+    [fetchRoom],
+  );
+
+  // One write in flight at a time. A failed batch keeps its id and is retried,
+  // so the server can recognise and ignore a batch it already applied.
   const drain = useCallback(async () => {
-    if (sendingRef.current) return;
+    if (sendingRef.current || !joinedRef.current) return;
     sendingRef.current = true;
+    let backoff = 500;
     try {
-      while (pendingRef.current !== 0) {
-        const delta = pendingRef.current;
-        pendingRef.current = 0;
-        inflightRef.current = delta;
+      while (aliveRef.current) {
+        const q = queueRef.current;
+        if (!q.inflight) {
+          if (q.pending === 0) break;
+          const wait = lastSendAtRef.current + MIN_SEND_GAP_MS - Date.now();
+          if (wait > 0) await sleep(wait);
+          const delta = Math.max(
+            -MAX_BATCH,
+            Math.min(MAX_BATCH, queueRef.current.pending),
+          );
+          if (delta === 0) break;
+          queueRef.current = {
+            pending: queueRef.current.pending - delta,
+            inflight: { id: crypto.randomUUID(), delta },
+          };
+          persistQueue();
+        }
+
+        const batch = queueRef.current.inflight!;
+        lastSendAtRef.current = Date.now();
         try {
           const { data, error: rpcError } = await getSupabase().rpc(
-            "adjust_room_count",
+            "count_taps",
             {
               p_code: roomCode,
-              p_delta: delta,
-              p_display_name: displayNameRef.current || null,
+              p_device_id: deviceIdRef.current,
+              p_batch_id: batch.id,
+              p_delta: batch.delta,
             },
           );
           if (rpcError) throw rpcError;
-          const updated = (Array.isArray(data) ? data[0] : data) as Room;
-          settleUntilRef.current = Date.now() + 1000;
-          inflightRef.current = 0;
-          setRoom(updated);
-          syncUnconfirmed();
+          const res = data as CountTapsResult;
+          queueRef.current = { ...queueRef.current, inflight: null };
+          persistQueue();
+          applyServerCount(res.count, res.version, false);
+          setMe((m) => (m ? { ...m, taps: res.taps } : m));
+          setOffline(false);
+          backoff = 500;
         } catch (err) {
-          inflightRef.current = 0;
-          syncUnconfirmed();
-          setError(err instanceof Error ? err.message : "Update failed.");
+          const msg = errorText(err);
+          if (
+            msg.includes("room_not_found") ||
+            msg.includes("invalid_batch") ||
+            msg.includes("not_joined")
+          ) {
+            queueRef.current = { ...queueRef.current, inflight: null };
+            persistQueue();
+            setError("Some taps could not be saved. Please reopen the room.");
+            continue;
+          }
+          setOffline(true);
+          await sleep(backoff);
+          backoff = Math.min(backoff * 2, 8000);
         }
       }
     } finally {
       sendingRef.current = false;
-      scheduleReconcile();
+      if (aliveRef.current) scheduleReconcile(600);
     }
-  }, [roomCode, syncUnconfirmed, scheduleReconcile]);
+  }, [roomCode, persistQueue, applyServerCount, scheduleReconcile]);
 
-  useEffect(() => {
-    const saved = getSavedName();
-    setName(saved);
-    setNameDraft(saved);
-    displayNameRef.current = saved.trim();
-    const hidden = localStorage.getItem(dhikrHiddenKey(roomCode)) === "1";
-    setDhikrOpen(!hidden);
-    setProgressOpen(localStorage.getItem(progressHiddenKey(roomCode)) !== "1");
-    setFamilyOpen(localStorage.getItem(familyHiddenKey(roomCode)) !== "1");
-  }, [roomCode]);
+  const refresh = useCallback(() => {
+    if (!joinedRef.current || !aliveRef.current) return;
+    void drain();
+    void fetchRoom();
+    if (familyOpenRef.current) void loadMembers();
+  }, [drain, fetchRoom, loadMembers]);
+
+  const finishEnter = useCallback(
+    (res: EnterRoomResult) => {
+      if (res.room.version > versionRef.current) {
+        versionRef.current = res.room.version;
+      }
+      setRoom(res.room);
+      setMe(res.member);
+      setNameTaken(false);
+      joinedRef.current = true;
+      setPhase("ready");
+      void loadMembers();
+      void drain();
+    },
+    [loadMembers, drain],
+  );
+
+  const enter = useCallback(
+    async (name: string | null, claim = false): Promise<string | null> => {
+      const { data, error: rpcError } = await getSupabase().rpc("enter_room", {
+        p_code: roomCode,
+        p_device_id: deviceIdRef.current,
+        p_display_name: name,
+        p_claim: claim,
+      });
+      if (!aliveRef.current) return null;
+      if (rpcError) return errorText(rpcError);
+      finishEnter(data as EnterRoomResult);
+      return null;
+    },
+    [roomCode, finishEnter],
+  );
+
+  const showNameGate = useCallback(
+    async (taken: boolean) => {
+      setNameTaken(taken);
+      setPhase("needs-name");
+      const { data } = await getSupabase().rpc("get_room", {
+        p_code: roomCode,
+      });
+      if (data && aliveRef.current) setRoom(data as Room);
+    },
+    [roomCode],
+  );
 
   useEffect(() => {
     countModeRef.current = countMode;
   }, [countMode]);
+
+  useEffect(() => {
+    familyOpenRef.current = familyOpen;
+  }, [familyOpen]);
+
+  useEffect(() => {
+    setDhikrOpen(localStorage.getItem(dhikrHiddenKey(roomCode)) !== "1");
+    setProgressOpen(localStorage.getItem(progressHiddenKey(roomCode)) !== "1");
+    setFamilyOpen(localStorage.getItem(familyHiddenKey(roomCode)) !== "1");
+  }, [roomCode]);
+
+  // Boot: identify this device, restore unsent taps, and enter the room.
+  useEffect(() => {
+    aliveRef.current = true;
+    deviceIdRef.current = getDeviceId();
+    queueRef.current = loadQueue(roomCode);
+    persistQueue();
+    const savedName = getSavedName().trim();
+    setNameDraft(savedName);
+
+    (async () => {
+      let err = await enter(null);
+      if (err?.includes("name_required") && savedName) {
+        err = await enter(savedName);
+      }
+      if (!err || !aliveRef.current) return;
+      if (err.includes("room_not_found")) setPhase("not-found");
+      else if (err.includes("name_required")) void showNameGate(false);
+      else if (err.includes("name_taken")) void showNameGate(true);
+      else {
+        setError(err);
+        setPhase("failed");
+      }
+    })();
+
+    return () => {
+      aliveRef.current = false;
+      joinedRef.current = false;
+      if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current);
+      if (trailingTimerRef.current) clearTimeout(trailingTimerRef.current);
+    };
+  }, [roomCode, enter, persistQueue, showNameGate]);
+
+  // Live room totals over Broadcast, sent by the database at most every 250ms.
+  const roomId = room?.id;
+  useEffect(() => {
+    if (phase !== "ready" || !roomId) return;
+    const supabase = getSupabase();
+    const topic = `room-live:${roomId}`;
+    for (const existing of supabase.getChannels()) {
+      if (existing.topic === `realtime:${topic}`) {
+        void supabase.removeChannel(existing);
+      }
+    }
+    const channel = supabase
+      .channel(topic)
+      .on("broadcast", { event: "count" }, ({ payload }) => {
+        const { count, version } = payload as {
+          count: number;
+          version: number;
+        };
+        if (!queueRef.current.inflight) {
+          applyServerCount(count, version, true);
+        }
+        // Throttling can skip the last update of a burst; fetch once things go quiet.
+        if (trailingTimerRef.current) clearTimeout(trailingTimerRef.current);
+        trailingTimerRef.current = setTimeout(() => {
+          trailingTimerRef.current = null;
+          void fetchRoom();
+        }, 1200);
+      })
+      .subscribe((status) => {
+        // Fires on connect and every reconnect; missed broadcasts aren't replayed.
+        if (status === "SUBSCRIBED") refresh();
+      });
+
+    function onVisible() {
+      if (document.visibilityState === "visible") refresh();
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", refresh);
+    window.addEventListener("focus", refresh);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("focus", refresh);
+      void supabase.removeChannel(channel);
+    };
+  }, [phase, roomId, applyServerCount, fetchRoom, refresh]);
+
+  useEffect(() => {
+    if (phase !== "ready" || !familyOpen) return;
+    void loadMembers();
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadMembers();
+    }, MEMBERS_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [phase, familyOpen, loadMembers]);
 
   function toggleDhikr() {
     setDhikrOpen((open) => {
@@ -201,184 +406,34 @@ export default function RoomClient({ code }: Props) {
     });
   }
 
-  useEffect(() => {
-    let cancelled = false;
-    let channel: ReturnType<ReturnType<typeof getSupabase>["channel"]> | null =
-      null;
-
-    async function boot() {
-      try {
-        const supabase = getSupabase();
-        const { data, error: roomError } = await supabase
-          .from("rooms")
-          .select("*")
-          .eq("code", roomCode)
-          .single();
-        if (roomError) throw roomError;
-        if (cancelled) return;
-
-        const current = data as Room;
-        roomIdRef.current = current.id;
-        setRoom(current);
-        await loadMembers(current.id);
-
-        const savedName = getSavedName().trim();
-        if (savedName) {
-          await supabase.rpc("join_room", {
-            p_code: roomCode,
-            p_display_name: savedName,
-          });
-          if (!cancelled) await loadMembers(current.id);
-        }
-
-        channel = supabase
-          .channel(`room:${roomCode}`)
-          .on(
-            "postgres_changes",
-            {
-              event: "UPDATE",
-              schema: "public",
-              table: "rooms",
-              filter: `id=eq.${current.id}`,
-            },
-            (payload) => {
-              // While our own write is in flight, its reply is the source of truth.
-              if (sendingRef.current) return;
-              const next = payload.new as Room;
-              setRoom((prev) => {
-                if (!prev) return next;
-                if (
-                  next.count < prev.count &&
-                  Date.now() < settleUntilRef.current
-                ) {
-                  return prev;
-                }
-                // Others' taps don't change your personal number, so don't animate it.
-                if (
-                  next.count !== prev.count &&
-                  countModeRef.current === "group"
-                ) {
-                  setBump(true);
-                  window.setTimeout(() => setBump(false), 220);
-                }
-                return { ...prev, ...next };
-              });
-            },
-          )
-          .on(
-            "postgres_changes",
-            {
-              event: "*",
-              schema: "public",
-              table: "room_members",
-              filter: `room_id=eq.${current.id}`,
-            },
-            () => {
-              scheduleMembersReload();
-            },
-          )
-          .subscribe((status) => {
-            // Fires on first connect and on every reconnect; events missed while offline aren't replayed.
-            if (status === "SUBSCRIBED") refresh();
-          });
-      } catch (err) {
-        if (!cancelled) {
-          setError(
-            err instanceof Error ? err.message : "Could not open this room.",
-          );
-        }
-      }
-    }
-
-    function refresh() {
-      if (cancelled || !roomIdRef.current) return;
-      void drain();
-      scheduleReconcile();
-      void loadMembers(roomIdRef.current).catch(() => {});
-    }
-
-    function onVisible() {
-      if (document.visibilityState === "visible") refresh();
-    }
-
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("online", refresh);
-    window.addEventListener("focus", refresh);
-
-    void boot();
-
-    return () => {
-      cancelled = true;
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("online", refresh);
-      window.removeEventListener("focus", refresh);
-      if (membersTimerRef.current) clearTimeout(membersTimerRef.current);
-      if (reconcileTimerRef.current) clearTimeout(reconcileTimerRef.current);
-      membersTimerRef.current = null;
-      reconcileTimerRef.current = null;
-      if (channel) {
-        void getSupabase().removeChannel(channel);
-      }
-    };
-  }, [roomCode, loadMembers, scheduleMembersReload, drain, scheduleReconcile]);
-
-  async function ensureName(): Promise<string | null> {
-    const trimmed = name.trim() || nameDraft.trim();
-    if (!trimmed) {
-      setError("Add your name before counting.");
-      return null;
-    }
-    if (trimmed !== name) {
-      saveName(trimmed);
-      setName(trimmed);
-      setNameDraft(trimmed);
-      displayNameRef.current = trimmed;
-      setMyTaps(0);
-      await getSupabase().rpc("join_room", {
-        p_code: roomCode,
-        p_display_name: trimmed,
-      });
-    }
-    return trimmed;
-  }
-
   function adjust(delta: number) {
-    setError(null);
-    if (!displayNameRef.current) {
-      void ensureName().then((n) => {
-        if (n) adjust(delta);
-      });
-      return;
-    }
+    if (phase !== "ready") return;
     if (delta < 0 && groupCount <= 0) return;
     if (delta < 0 && countMode === "personal" && personalCount <= 0) return;
-
-    writeSeqRef.current += 1;
-    pendingRef.current += delta;
-    syncUnconfirmed();
-    setMyTaps((t) => Math.max(0, t + delta));
-    setBump(true);
-    window.setTimeout(() => setBump(false), 220);
+    queueRef.current = {
+      ...queueRef.current,
+      pending: queueRef.current.pending + delta,
+    };
+    persistQueue();
+    flashBump();
     void drain();
   }
 
-  async function saveDisplayName(e: React.FormEvent) {
+  async function submitName(e: React.FormEvent, claim = false) {
     e.preventDefault();
     const trimmed = nameDraft.trim();
     if (!trimmed) return;
-    saveName(trimmed);
-    setName(trimmed);
-    displayNameRef.current = trimmed;
-    setMyTaps(0);
+    setJoining(true);
     setError(null);
-    try {
-      await getSupabase().rpc("join_room", {
-        p_code: roomCode,
-        p_display_name: trimmed,
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not save name.");
+    const err = await enter(trimmed, claim);
+    setJoining(false);
+    if (!err) {
+      saveName(trimmed);
+      return;
     }
+    if (err.includes("name_taken")) setNameTaken(true);
+    else if (err.includes("room_not_found")) setPhase("not-found");
+    else setError(err);
   }
 
   async function copyCode() {
@@ -391,11 +446,17 @@ export default function RoomClient({ code }: Props) {
     }
   }
 
-  if (error && !room) {
+  if (phase === "not-found" || phase === "failed") {
     return (
       <main className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center gap-4 px-5 text-center">
-        <h1 className="font-display text-3xl">Room not found</h1>
-        <p className="text-[var(--muted)]">{error}</p>
+        <h1 className="font-display text-3xl">
+          {phase === "not-found" ? "Room not found" : "Could not open room"}
+        </h1>
+        <p className="text-[var(--muted)]">
+          {phase === "not-found"
+            ? `No room uses the code ${roomCode}. Check the code with your family.`
+            : error}
+        </p>
         <Link
           href="/"
           className="rounded-2xl bg-[var(--accent)] px-5 py-3 font-semibold text-white"
@@ -406,7 +467,77 @@ export default function RoomClient({ code }: Props) {
     );
   }
 
-  if (!room) {
+  if (phase === "needs-name") {
+    return (
+      <main className="mx-auto flex min-h-full w-full max-w-lg flex-col justify-center px-5 py-10">
+        <header className="animate-rise mb-8 text-center">
+          <p className="mb-2 text-sm font-medium tracking-[0.2em] text-[var(--accent-deep)] uppercase">
+            You&apos;re invited
+          </p>
+          <h1 className="font-display text-4xl tracking-tight text-[var(--ink)]">
+            {room?.name ?? "Dhikr room"}
+          </h1>
+          {room && (
+            <p className="mt-2 text-sm text-[var(--muted)]">
+              Goal {room.goal.toLocaleString()} ·{" "}
+              {room.count.toLocaleString()} counted so far
+            </p>
+          )}
+        </header>
+        <form
+          onSubmit={(e) => submitName(e)}
+          className="glass animate-rise-delay rounded-[28px] p-6"
+        >
+          <label className="block">
+            <span className="mb-1.5 block text-sm font-medium text-[var(--muted)]">
+              Your name, so the family can see who&apos;s counting
+            </span>
+            <input
+              value={nameDraft}
+              onChange={(e) => {
+                setNameDraft(e.target.value);
+                setNameTaken(false);
+              }}
+              className="w-full rounded-2xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-4 py-3 text-base outline-none ring-[var(--ring)] focus:ring-4"
+              placeholder="e.g. Saif"
+              autoComplete="nickname"
+              maxLength={40}
+              autoFocus
+            />
+          </label>
+          {nameTaken && (
+            <div className="mt-3 rounded-xl bg-[#fff4d8] px-3 py-2 text-sm text-[#7a5a12]">
+              Someone named {nameDraft.trim()} is already counting in this room
+              on another device. Use a different name, or if that&apos;s you,
+              continue as them.
+              <button
+                type="button"
+                onClick={(e) => submitName(e, true)}
+                disabled={joining}
+                className="mt-2 block font-semibold underline"
+              >
+                That&apos;s me, continue as {nameDraft.trim()}
+              </button>
+            </div>
+          )}
+          {error && (
+            <p className="mt-3 rounded-xl bg-[#f8e8e4] px-3 py-2 text-sm text-[#8a3b2d]">
+              {error}
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={joining || !nameDraft.trim()}
+            className="tap-btn mt-4 w-full rounded-2xl bg-[var(--accent)] px-4 py-3.5 text-base font-semibold text-white disabled:opacity-60"
+          >
+            {joining ? "Joining…" : "Join room"}
+          </button>
+        </form>
+      </main>
+    );
+  }
+
+  if (phase === "loading" || !room) {
     return (
       <main className="mx-auto flex min-h-full max-w-lg items-center justify-center px-5">
         <p className="text-[var(--muted)]">Opening room…</p>
@@ -441,34 +572,6 @@ export default function RoomClient({ code }: Props) {
           <span className="font-semibold tracking-widest">{room.code}</span>
         </p>
       </header>
-
-      {!name && (
-        <form
-          onSubmit={saveDisplayName}
-          className="glass mb-5 rounded-2xl p-4 animate-rise"
-        >
-          <label className="block">
-            <span className="mb-1.5 block text-sm text-[var(--muted)]">
-              Your name to join this room
-            </span>
-            <div className="flex gap-2">
-              <input
-                value={nameDraft}
-                onChange={(e) => setNameDraft(e.target.value)}
-                className="w-full rounded-xl border border-[rgba(16,41,36,0.1)] bg-white/80 px-3 py-2.5 outline-none ring-[var(--ring)] focus:ring-4"
-                placeholder="Your name"
-                maxLength={40}
-              />
-              <button
-                type="submit"
-                className="rounded-xl bg-[var(--accent)] px-4 py-2.5 font-semibold text-white"
-              >
-                Join
-              </button>
-            </div>
-          </label>
-        </form>
-      )}
 
       <section className="glass animate-rise-delay rounded-[28px] px-5 py-8 text-center sm:px-8">
         <div className="mx-auto mb-4 grid max-w-[220px] grid-cols-2 gap-1 rounded-2xl bg-[rgba(16,41,36,0.06)] p-1">
@@ -568,6 +671,12 @@ export default function RoomClient({ code }: Props) {
             +
           </button>
         </div>
+
+        {offline && (
+          <p className="mt-4 text-xs text-[var(--muted)]">
+            Reconnecting… your taps are saved and will be sent.
+          </p>
+        )}
       </section>
 
       {error && (
@@ -642,9 +751,16 @@ export default function RoomClient({ code }: Props) {
                 key={member.id}
                 className="flex items-center justify-between px-4 py-3"
               >
-                <span className="font-medium">{member.display_name}</span>
+                <span className="font-medium">
+                  {member.display_name}
+                  {member.id === me?.id ? (
+                    <span className="ml-1.5 text-xs text-[var(--muted)]">
+                      (you)
+                    </span>
+                  ) : null}
+                </span>
                 <span className="tabular-nums text-[var(--muted)]">
-                  {(isMe(member)
+                  {(member.id === me?.id
                     ? personalCount
                     : member.taps
                   ).toLocaleString()}

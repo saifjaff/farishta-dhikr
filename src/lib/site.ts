@@ -17,7 +17,7 @@ export const faqs: { question: string; answer: string }[] = [
   {
     question: "How do I count dhikr together with my family?",
     answer:
-      "Create a room, choose a dhikr and a goal, then share the six-character room code. Each person joins with their name and taps the plus button. Every tap is added to the shared total in real time.",
+      "Create a room, choose a dhikr and a goal, then share the room link or code. Each person enters their name and taps the plus button. Every tap is added to the shared total in real time.",
   },
   {
     question: "Does it work if my family lives in different countries?",

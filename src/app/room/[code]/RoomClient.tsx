@@ -507,9 +507,8 @@ export default function RoomClient({ code }: Props) {
           </label>
           {nameTaken && (
             <div className="mt-3 rounded-xl bg-[#fff4d8] px-3 py-2 text-sm text-[#7a5a12]">
-              Someone named {nameDraft.trim()} is already counting in this room
-              on another device. Use a different name, or if that&apos;s you,
-              continue as them.
+              <strong>{nameDraft.trim()}</strong>
+              {" is already counting in this room on another device. Use a different name, or if that's you, continue as them."}
               <button
                 type="button"
                 onClick={(e) => submitName(e, true)}

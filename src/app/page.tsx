@@ -255,7 +255,7 @@ export default function HomePage() {
           </div>
 
           <p className="mt-6 text-center text-xs text-[var(--muted)]">
-            Free, no ads, no account. Made by {brandName}.
+            Free, no ads, no account. Made by the {brandName} team.
           </p>
         </div>
 

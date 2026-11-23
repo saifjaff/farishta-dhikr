@@ -769,6 +769,17 @@ export default function RoomClient({ code }: Props) {
           </ul>
         )}
       </section>
+
+      <p className="mt-8 text-center text-xs text-[var(--muted)]">
+        Made by the{" "}
+        <a
+          href="https://farishta.si"
+          className="font-medium text-[var(--accent-deep)] underline underline-offset-4"
+        >
+          Farishta
+        </a>{" "}
+        team
+      </p>
     </main>
   );
 }

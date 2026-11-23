@@ -350,6 +350,17 @@ export default function HomeClient() {
           </button>
         </form>
       </section>
+
+      <p className="mt-5 text-center text-xs text-[var(--muted)]">
+        Made by the{" "}
+        <a
+          href="https://farishta.si"
+          className="font-medium text-[var(--accent-deep)] underline underline-offset-4"
+        >
+          Farishta
+        </a>{" "}
+        team
+      </p>
     </div>
   );
 }

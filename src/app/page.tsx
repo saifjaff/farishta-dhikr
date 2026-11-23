@@ -138,9 +138,9 @@ export default function HomePage() {
       <dialog
         id="how-it-works"
         aria-labelledby="how-it-works-title"
-        className="sheet mx-auto mb-0 mt-auto max-h-[88dvh] w-full max-w-lg flex-col overflow-hidden rounded-t-[32px] bg-[#f6faf8] p-0 text-[var(--ink)] shadow-[0_-20px_60px_rgba(16,41,36,0.25)] open:flex sm:mb-auto sm:rounded-[32px]"
+        className="sheet mx-auto mb-0 mt-auto h-[85dvh] max-h-[85dvh] w-full sm:h-[80dvh] max-w-lg flex-col overflow-hidden rounded-t-[32px] bg-[#f6faf8] p-0 text-[var(--ink)] shadow-[0_-20px_60px_rgba(16,41,36,0.25)] open:flex sm:mb-auto sm:rounded-[32px]"
       >
-        <div className="flex-1 overflow-y-auto px-5 pb-6">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-6 [-webkit-overflow-scrolling:touch]">
           <div className="mx-auto mt-2.5 h-1.5 w-10 rounded-full bg-[rgba(16,41,36,0.15)]" />
 
           <div className="mt-4 flex items-start justify-between gap-4">
@@ -158,7 +158,7 @@ export default function HomePage() {
             <form method="dialog">
               <button
                 aria-label="Close"
-                className="tap-btn grid h-9 w-9 place-items-center rounded-full bg-[rgba(16,41,36,0.06)] text-[var(--muted)]"
+                className="tap-btn grid h-9 w-9 place-items-center rounded-full bg-[rgba(16,41,36,0.06)] text-[var(--muted)] outline-none"
               >
                 <svg
                   viewBox="0 0 20 20"

@@ -3,9 +3,35 @@ import type { Dhikr } from "@/lib/dhikr";
 type Props = {
   dhikr: Dhikr;
   className?: string;
+  compact?: boolean;
 };
 
-export default function DhikrPreview({ dhikr, className = "" }: Props) {
+export default function DhikrPreview({
+  dhikr,
+  className = "",
+  compact = false,
+}: Props) {
+  if (compact) {
+    return (
+      <div
+        className={`rounded-2xl border border-[rgba(16,41,36,0.08)] bg-white/70 px-3 py-2.5 text-center ${className}`}
+      >
+        {dhikr.arabic ? (
+          <p
+            className="font-display text-2xl leading-snug text-[var(--ink)]"
+            dir="rtl"
+            lang="ar"
+          >
+            {dhikr.arabic}
+          </p>
+        ) : null}
+        <p className="mt-0.5 truncate text-xs text-[var(--muted)]">
+          {[dhikr.transliteration, dhikr.meaning].filter(Boolean).join(" · ")}
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div
       className={`rounded-2xl border border-[rgba(16,41,36,0.08)] bg-white/70 px-4 py-4 text-center ${className}`}

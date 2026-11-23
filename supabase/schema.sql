@@ -1,5 +1,6 @@
 -- Family Dhikr Counter schema
--- Run this in the Supabase SQL Editor (Dashboard → SQL → New query)
+-- Run this in the Supabase SQL Editor (Dashboard → SQL → New query),
+-- then apply the files in supabase/migrations in name order.
 
 create table if not exists public.rooms (
   id uuid primary key default gen_random_uuid(),
